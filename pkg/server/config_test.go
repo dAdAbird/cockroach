@@ -15,11 +15,9 @@
 package server
 
 import (
-	"fmt"
+	"io/ioutil"
 	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip/resolver"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -205,7 +204,7 @@ func TestFilterGossipBootstrapResolvers(t *testing.T) {
 	}
 }
 
-func TestTempStoreDerivation(t *testing.T) {
+func TestTempStoreCleanupOnShutdown(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	storeDir, storeDirCleanup := testutils.TempDir(t)
@@ -214,93 +213,41 @@ func TestTempStoreDerivation(t *testing.T) {
 	tempDir, tempDirCleanup := testutils.TempDir(t)
 	defer tempDirCleanup()
 
-	testCases := []struct {
-		name             string
-		firstStoreArg    string
-		tempStoreDir     string
-		expectedTempSpec base.StoreSpec
-	}{
-		{
-			name:             "InMemoryNoTempPath",
-			firstStoreArg:    "type=mem,size=1GiB",
-			expectedTempSpec: base.StoreSpec{InMemory: true},
-		},
-		{
-			name:             "InMemoryWithTempPath",
-			firstStoreArg:    "type=mem,size=1GiB",
-			tempStoreDir:     "foo",
-			expectedTempSpec: base.StoreSpec{InMemory: true},
-		},
-		{
-			name:             "InMemoryWithAttributes",
-			firstStoreArg:    "type=mem,size=1GiB,attrs=garbage:moregarbage",
-			expectedTempSpec: base.StoreSpec{InMemory: true},
-		},
-		{
-			name:             "StorePathNoTempPath",
-			firstStoreArg:    fmt.Sprintf("path=%s", storeDir),
-			expectedTempSpec: base.StoreSpec{Path: fmt.Sprintf("%s", filepath.Join(storeDir, "cockroach-temp*"))},
-		},
-		{
-			name:             "StorePathWithTempPath",
-			firstStoreArg:    fmt.Sprintf("path=%s", storeDir),
-			tempStoreDir:     tempDir,
-			expectedTempSpec: base.StoreSpec{Path: fmt.Sprintf("%s", filepath.Join(tempDir, "cockroach-temp*"))},
-		},
-		{
-			name:             "StorePathWithAttributes",
-			firstStoreArg:    fmt.Sprintf("path=%s,size=1GiB,attrs=garbage:moregarbage", storeDir),
-			expectedTempSpec: base.StoreSpec{Path: fmt.Sprintf("%s", filepath.Join(storeDir, "cockroach-temp*"))},
-		},
-	}
+	storeSpec := base.StoreSpec{Path: storeDir}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			spec, err := base.NewStoreSpec(tc.firstStoreArg)
-			if err != nil {
-				t.Fatal(err)
-			}
+	// This will be cleaned up by tempDirCleanup.
+	tempStorage, _ := base.TempStorage{ParentDir: tempDir}.Reinitialize(storeSpec)
 
-			actual, err := MakeTempStoreSpecFromStoreSpec(tc.tempStoreDir, spec)
-			if err != nil {
-				t.Fatal(err)
-			}
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
+		StoreSpecs:  []base.StoreSpec{storeSpec},
+		TempStorage: &tempStorage,
+	})
 
-			pathMatched, err := filepath.Match(tc.expectedTempSpec.Path, actual.Path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Replace expected path with the temporary path generated and perform an equality
-			// check on the rest of the StoreSpec's fields.
-			tc.expectedTempSpec.Path = actual.Path
-			specMatched := tc.expectedTempSpec.String() == actual.String()
-
-			if !pathMatched || !specMatched {
-				t.Fatalf(
-					"temp store spec did not match expected:\n%s",
-					strings.Join(pretty.Diff(tc.expectedTempSpec, actual), "\n"),
-				)
-			}
-
-		})
-	}
-}
-
-func TestTempStoreCleanup(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	tempDir, err := ioutil.TempDir("", "")
+	// Since starting a server generates an arbitrary temporary directory
+	// under tempDir, we need to retrieve that directory and check it
+	// exists.
+	files, err := ioutil.ReadDir(tempStorage.ParentDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tempDir)
-
-	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
-		TempStoreSpec: base.StoreSpec{Path: tempDir},
-	})
+	if len(files) != 1 {
+		t.Fatalf("expected only one temporary file to be created during server startup: found %d files", len(files))
+	}
+	tempPath := files[0].Name()
 
 	s.Stopper().Stop(context.TODO())
 
-	if _, err := os.Stat(tempDir); err == nil {
-		t.Fatalf("temporary directory not cleaned up after stopping server")
+	// Check that the temporary directory was removed.
+	_, err = os.Stat(tempPath)
+	// os.Stat returns a nil err if the file exists, so we need to check
+	// the NOT of this condition instead of os.IsExist() (which returns
+	// false and misses this error).
+	if !os.IsNotExist(err) {
+		if err == nil {
+			t.Fatalf("temporary directory %s not cleaned up after stopping server", tempPath)
+		} else {
+			// Unexpected error.
+			t.Fatal(err)
+		}
 	}
 }

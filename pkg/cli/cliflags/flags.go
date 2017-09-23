@@ -461,9 +461,10 @@ Also, if you use equal signs in the file path to a store, you must use the
 	TempDir = FlagInfo{
 		Name: "temp-dir",
 		Description: `
-The path under which to create a temporary subdirectory to be used for temporary files.
+The parent directory path where a temporary subdirectory will be created to be used for temporary files.
 This path must exist or the node will not start.
-The temporary subdirectory is used primarily as working memory for distributed computations.
+The temporary subdirectory is used primarily as working memory for distributed computations
+and CSV importing.
 For example, the following will generate an arbitrary, temporary subdirectory
 "/mnt/ssd01/temp/cockroach-temp<NUMBER>":
 <PRE>
@@ -472,15 +473,7 @@ For example, the following will generate an arbitrary, temporary subdirectory
 
 </PRE>
 If this flag is unspecified, the temporary subdirectory will be located under
-the root of store 1.
-
-Unlike the --store flag, one should NOT include any named labels like "path=" or "attrs=".
-For example, the following will be interpreted as the undesirable, relative path "./path=foo":
-<PRE>
-
-  --temp-dir=path=foo
-
-</PRE>`,
+the root of the first store.`,
 	}
 
 	URL = FlagInfo{
